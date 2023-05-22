@@ -15,8 +15,7 @@ from functools import partial
 
 import tensorflow_probability.substrates.jax as tfp
 import tensorflow_probability.substrates.jax.distributions as tfd
-
-from ssm.messages import hmm_sample
+from dynamax.hidden_markov_model.inference import hmm_posterior_sample
 
 from .util import (project,
                   xyz_to_uv, uv_to_xyz, signed_angular_difference,
@@ -547,19 +546,16 @@ def U_given_S_log_likelihoods(params, samples):
                                    params['state_concentrations'])
     return jnp.sum(U_given_S.log_prob(canonical_directions[:,None,...]),
                    axis=-1)
-
+@jit
 def sample_state(seed, params, samples):
 
     transition_matrix = samples['transition_matrix']    # shape (S, S)
 
+    initial_distribution = params['state_probability']  # shape (S,)
+
     lls = U_given_S_log_likelihoods(params, samples)
-    
-    # Run forward filter, then backward sampler to draw states
-    # Must move to CPU to sample, then move back to GPU
-    states = hmm_sample(onp.asarray(params['state_probability'], dtype=onp.float64),
-                        onp.asarray(transition_matrix[None, :, :], dtype=onp.float64),
-                        onp.asarray(lls, dtype=onp.float64))
-    return jnp.asarray(states)
+
+    return hmm_posterior_sample(seed, initial_distribution, transition_matrix, lls)
 
 @jit
 def sample_transition_matrix(seed, params, samples):
@@ -575,7 +571,7 @@ def sample_transition_matrix(seed, params, samples):
 
     return tfd.Dirichlet(params['state_transition_count'] + counts).sample(seed=seed)
 
-# Cannot jit because smaple_state requires moving arrays to CPU
+
 # @jit
 def step(seed, params, observations, samples,
          init_step_size=1e-1, num_leapfrog_steps=1):
