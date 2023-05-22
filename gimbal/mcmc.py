@@ -160,10 +160,12 @@ def initialize_parameters(params,
     
     return params
 
-@jit
+
+@partial(jit, static_argnames=('ignore_anatomy',))
 def log_joint_probability(params, observations,
                           outliers, positions, directions,
-                          heading, pose_state, transition_matrix):
+                          heading, pose_state, transition_matrix,
+                          ignore_anatomy=False):
     """Compute the log joint probabiltiy of sampled values under the
     prior parameters. 
 
@@ -177,6 +179,8 @@ def log_joint_probability(params, observations,
         heading: ndarray, shape (N,).
         pose_state: ndarray, shape (N,).
         transition_matrix: ndarray, shape (S,S).
+        ignore_anatomy: bool, optional. default: False
+            If True, only include positions and outliers in the model.
     """
 
     C, S = observations.shape[1], transition_matrix.shape[0]
@@ -261,34 +265,36 @@ def log_joint_probability(params, observations,
     # p(y | x, z)
     lp = jnp.sum(vmap(log_likelihood, in_axes=(0,0,0,None))
                      (positions, observations, outliers, params))
-
-    # p(z; rho)
-    lp += jnp.sum(Z_prior.log_prob(outliers))
-
-    # p(x | u)
-    lp += jnp.sum(vmap(log_pos_given_dir, in_axes=(0,0,None))
-                      (positions, directions, params))
-
+    
     # p(x[t] | x[t-1])
     lp += jnp.sum(vmap(log_pos_dynamics, in_axes=(0,0,None))
                       (positions[1:], positions[:-1], params))
     lp += X_t0.log_prob(positions[0].ravel())
 
-    # p(u | s)
-    # canon_u = jnp.einsum('tmn, tjn-> tjm', R_mat(-h), u)
-    # lp = jnp.sum(U_given_S[s].log_prob(canon_u))
-    lp += jnp.sum(vmap(log_dir_given_state, in_axes=(0,0,0,None))
-                      (directions, heading, pose_state, params))
+    if not ignore_anatomy:
+        
+        # p(z; rho)
+        lp += jnp.sum(Z_prior.log_prob(outliers))
 
-    # p(h) = VonMises(0, 0), so lp = max entropy over circle, which is constant
+        # p(x | u)
+        lp += jnp.sum(vmap(log_pos_given_dir, in_axes=(0,0,None))
+                        (positions, directions, params))
 
-    # p(s[0]) + sum p(s[t+1] | s[t])
-    lp += jnp.sum(jnp.log(transition_matrix[pose_state[1:], pose_state[:-1]]))
-    lp += jnp.sum(jnp.log(params['state_probability']))
+        # p(u | s)
+        # canon_u = jnp.einsum('tmn, tjn-> tjm', R_mat(-h), u)
+        # lp = jnp.sum(U_given_S[s].log_prob(canon_u))
+        lp += jnp.sum(vmap(log_dir_given_state, in_axes=(0,0,0,None))
+                        (directions, heading, pose_state, params))
+
+        # p(h) = VonMises(0, 0), so lp = max entropy over circle, which is constant
+
+        # p(s[0]) + sum p(s[t+1] | s[t])
+        lp += jnp.sum(jnp.log(transition_matrix[pose_state[1:], pose_state[:-1]]))
+        lp += jnp.sum(jnp.log(params['state_probability']))
 
     return lp
 
-def initialize(seed, params, observations, init_positions=None):
+def initialize(seed, params, observations, init_positions=None, ignore_anatomy=False):
     """Initialize latent variables of model.
 
     Parameters
@@ -299,6 +305,8 @@ def initialize(seed, params, observations, init_positions=None):
         init_positions: ndarray, shape (N, K, D), optional.
             Initial guess of 3D positions. If None (default), positions
             are triangulated using direct linear triangulation.
+        ignore_anatomy: bool, optional. default: False
+            If True, only include positions and outliers in the model.
         
     Returns
     -------
@@ -308,6 +316,7 @@ def initialize(seed, params, observations, init_positions=None):
     seed = iter(jr.split(seed, 3))
 
     N, C, K, D_obs = observations.shape
+    
 
     # ---------------------
     # Initialize positions
@@ -327,40 +336,6 @@ def initialize(seed, params, observations, init_positions=None):
     hmc_log_accept_ratio = jnp.array(0.)
     hmc_proposed_gradients = jnp.empty_like(positions)
 
-    # --------------------------
-    # Derive initial directions
-    # --------------------------
-    directions = positions - positions[:,params['parents']]
-    directions /= jnp.linalg.norm(directions, axis=-1, keepdims=True)
-
-    # Use placeholder value for undefined root direction
-    directions = directions.at[:,0].set(0.)
-
-    # -------------------------------
-    # Derive initial heading vectors
-    # -------------------------------
-    k_base, k_tip = params['crf_keypoints']
-    u_axis, v_axis, n_axis = params['crf_axes']
-    
-    # Unnormalized direction vector
-    heading = positions[:,k_tip] - positions[:,k_base]
-
-    # Project 3D direction vectors onto 2D plane of coordinate reference
-    # frame (CRF). Then, re-embed the 2D plane in the ambient 3D frame.
-    # In the default case, the CRF is defined as the standard Cartesian
-    # reference (i.e. poses aligned to "x"-axis, and headings considered
-    # in the "x-y" plane, rotating about normal "z"-axis.) The following
-    # two operations then effectively zero-out the z-axis coordinates.
-    heading = xyz_to_uv(heading, u_axis, v_axis)
-    heading = uv_to_xyz(heading, u_axis, v_axis)
-
-    # Normalize vector to unit length
-    heading /= jnp.linalg.norm(heading, axis=-1, keepdims=True)
-
-    # Calculate angle from canonical reference direction
-    heading = signed_angular_difference(
-                jnp.broadcast_to(u_axis, heading.shape), heading, n_axis)
-
     # ---------------------------
     # Sample outliers from prior
     # ---------------------------
@@ -370,18 +345,56 @@ def initialize(seed, params, observations, init_positions=None):
     outliers = jnp.where(jnp.isnan(observations).any(axis=-1),
                          True, outliers)
 
-    # ------------------------------------------------------
-    # Sample pose states and transition matrix from uniform
-    # ------------------------------------------------------
-    # TODO sample from prior parameters, state_probability and state_counts
-    num_states = len(params['state_probability'])
-    pose_state = jr.randint(next(seed), (N,), 0, num_states)
-    transition_matrix = jnp.ones((num_states, num_states)) / num_states
+
+    if not ignore_anatomy:
+        # --------------------------
+        # Derive initial directions
+        # --------------------------
+        directions = positions - positions[:,params['parents']]
+        directions /= jnp.linalg.norm(directions, axis=-1, keepdims=True)
+
+        # Use placeholder value for undefined root direction
+        directions = directions.at[:,0].set(0.)
+
+        # -------------------------------
+        # Derive initial heading vectors
+        # -------------------------------
+        k_base, k_tip = params['crf_keypoints']
+        u_axis, v_axis, n_axis = params['crf_axes']
+        
+        # Unnormalized direction vector
+        heading = positions[:,k_tip] - positions[:,k_base]
+
+        # Project 3D direction vectors onto 2D plane of coordinate reference
+        # frame (CRF). Then, re-embed the 2D plane in the ambient 3D frame.
+        # In the default case, the CRF is defined as the standard Cartesian
+        # reference (i.e. poses aligned to "x"-axis, and headings considered
+        # in the "x-y" plane, rotating about normal "z"-axis.) The following
+        # two operations then effectively zero-out the z-axis coordinates.
+        heading = xyz_to_uv(heading, u_axis, v_axis)
+        heading = uv_to_xyz(heading, u_axis, v_axis)
+
+        # Normalize vector to unit length
+        heading /= jnp.linalg.norm(heading, axis=-1, keepdims=True)
+
+        # Calculate angle from canonical reference direction
+        heading = signed_angular_difference(
+                    jnp.broadcast_to(u_axis, heading.shape), heading, n_axis)
+
+
+        # ------------------------------------------------------
+        # Sample pose states and transition matrix from uniform
+        # ------------------------------------------------------
+        # TODO sample from prior parameters, state_probability and state_counts
+        num_states = len(params['state_probability'])
+        pose_state = jr.randint(next(seed), (N,), 0, num_states)
+        transition_matrix = jnp.ones((num_states, num_states)) / num_states
 
     log_prob = log_joint_probability(
                     params, observations,
                     outliers, positions, directions,
                     heading, pose_state, transition_matrix,
+                    ignore_anatomy=ignore_anatomy
                     )
 
     return dict(
@@ -398,7 +411,8 @@ def initialize(seed, params, observations, init_positions=None):
   
 @jit
 def sample_positions(seed, params, observations, samples,
-                     step_size=1e-1, num_leapfrog_steps=1):
+                     step_size=1e-1, num_leapfrog_steps=1,
+                     ignore_anatomy=False):
     """Sample positions by taking one Hamiltonian Monte Carlo step."""
     
     N, C, K, D_obs = observations.shape
@@ -413,6 +427,7 @@ def sample_positions(seed, params, observations, samples,
             samples['heading'],
             samples['pose_state'],
             samples['transition_matrix'],
+            ignore_anatomy=ignore_anatomy
             )
 
     last_positions = samples['positions']   # shape (N, K, D)
@@ -574,7 +589,8 @@ def sample_transition_matrix(seed, params, samples):
 
 # @jit
 def step(seed, params, observations, samples,
-         init_step_size=1e-1, num_leapfrog_steps=1):
+         init_step_size=1e-1, num_leapfrog_steps=1,
+         ignore_anatomy=False):
 
     """Execute a single iteration of MCMC sampling."""
     seeds = jr.split(seed, 6)
@@ -592,25 +608,26 @@ def step(seed, params, observations, samples,
     samples['outliers'] = \
                     sample_outliers(seeds[1], params, observations, samples)
 
-    samples['directions'] = \
-                    sample_directions(seeds[2], params, samples)
+    if not ignore_anatomy:
+        samples['directions'] = \
+                        sample_directions(seeds[2], params, samples)
 
-    samples['heading'] = \
-                    sample_headings(seeds[3], params, samples)
-    
-    samples['pose_state'] = \
-                    sample_state(seeds[4], params, samples)
-    
-    samples['transition_matrix'] = \
-                    sample_transition_matrix(seeds[5], params, samples)
-    
-    samples['log_probability'] = log_joint_probability(
-                        params, observations,
-                        samples['outliers'],
-                        samples['positions'], samples['directions'],
-                        samples['heading'], samples['pose_state'],
-                        samples['transition_matrix'],
-                        )
+        samples['heading'] = \
+                        sample_headings(seeds[3], params, samples)
+        
+        samples['pose_state'] = \
+                        sample_state(seeds[4], params, samples)
+        
+        samples['transition_matrix'] = \
+                        sample_transition_matrix(seeds[5], params, samples)
+        
+        samples['log_probability'] = log_joint_probability(
+                            params, observations,
+                            samples['outliers'],
+                            samples['positions'], samples['directions'],
+                            samples['heading'], samples['pose_state'],
+                            samples['transition_matrix'],
+                            )
     return samples
 
 def predict(seed, params, observations, init_positions=None,
