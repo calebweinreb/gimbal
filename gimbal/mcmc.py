@@ -412,8 +412,7 @@ def initialize(seed, params, observations, outlier_prob,
   
 @jit
 def sample_positions(seed, params, observations, outlier_prob, 
-                     samples, step_size=1e-1, num_leapfrog_steps=1,
-                     ignore_anatomy=False):
+                     samples, ignore_anatomy=False):
     """Sample positions by taking one Hamiltonian Monte Carlo step."""
     
     N, C, K, D_obs = observations.shape
@@ -436,8 +435,8 @@ def sample_positions(seed, params, observations, outlier_prob,
 
     hmc = tfp.mcmc.HamiltonianMonteCarlo(
                 target_log_prob_fn=objective,
-                num_leapfrog_steps=num_leapfrog_steps,
-                step_size=step_size
+                num_leapfrog_steps=params['num_leapfrog_steps'],
+                step_size=params['step_size']
             )
 
     positions, kernel_results = hmc.one_step(
@@ -591,7 +590,6 @@ def sample_transition_matrix(seed, params, samples):
 
 # @jit
 def step(seed, params, observations, samples, outlier_prob,
-         init_step_size=1e-1, num_leapfrog_steps=1,
          ignore_anatomy=False):
 
     """Execute a single iteration of MCMC sampling."""
@@ -599,29 +597,18 @@ def step(seed, params, observations, samples, outlier_prob,
     
     positions, kernel_results = sample_positions(
                     seeds[0], params, observations, outlier_prob, 
-                    samples, init_step_size=init_step_size, 
-                    num_leapfrog_steps=num_leapfrog_steps)
+                    samples, ignore_anatomy=ignore_anatomy)
                     
     samples['positions'] = positions
     samples['hmc_log_accept_ratio'] = kernel_results.log_accept_ratio
-    samples['hmc_proposed_gradients'] = \
-                    kernel_results.proposed_results.grads_target_log_prob[0]
-
-    samples['outliers'] = \
-                    sample_outliers(seeds[1], params, observations, outlier_prob, samples)
+    samples['hmc_proposed_gradients'] = kernel_results.proposed_results.grads_target_log_prob[0]
+    samples['outliers'] = sample_outliers(seeds[1], params, observations, outlier_prob, samples)
 
     if not ignore_anatomy:
-        samples['directions'] = \
-                        sample_directions(seeds[2], params, samples)
-
-        samples['heading'] = \
-                        sample_headings(seeds[3], params, samples)
-        
-        samples['pose_state'] = \
-                        sample_state(seeds[4], params, samples)
-        
-        samples['transition_matrix'] = \
-                        sample_transition_matrix(seeds[5], params, samples)
+        samples['directions'] = sample_directions(seeds[2], params, samples)
+        samples['heading'] = sample_headings(seeds[3], params, samples)
+        samples['pose_state'] = sample_state(seeds[4], params, samples)
+        samples['transition_matrix'] = sample_transition_matrix(seeds[5], params, samples)
         
         
     samples['log_probability'] = log_joint_probability(
