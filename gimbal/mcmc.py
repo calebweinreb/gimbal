@@ -293,6 +293,7 @@ def log_joint_probability(params, observations, outlier_prob,
 
     return lp
 
+
 def initialize(seed, params, observations, outlier_prob, 
                init_positions=None, ignore_anatomy=False):
     """Initialize latent variables of model.
@@ -392,7 +393,7 @@ def initialize(seed, params, observations, outlier_prob,
         transition_matrix = jnp.ones((num_states, num_states)) / num_states
 
     log_prob = log_joint_probability(
-                    params, observations,
+                    params, observations, outlier_prob,
                     outliers, positions, directions,
                     heading, pose_state, transition_matrix,
                     ignore_anatomy=ignore_anatomy
@@ -410,7 +411,7 @@ def initialize(seed, params, observations, outlier_prob,
         hmc_proposed_gradients=hmc_proposed_gradients,
     )
   
-@jit
+@partial(jit, static_argnames=('ignore_anatomy',))
 def sample_positions(seed, params, observations, outlier_prob, 
                      samples, ignore_anatomy=False):
     """Sample positions by taking one Hamiltonian Monte Carlo step."""
@@ -562,33 +563,31 @@ def U_given_S_log_likelihoods(params, samples):
                                    params['state_concentrations'])
     return jnp.sum(U_given_S.log_prob(canonical_directions[:,None,...]),
                    axis=-1)
-@jit
+
+
 def sample_state(seed, params, samples):
-
     transition_matrix = samples['transition_matrix']    # shape (S, S)
-
     initial_distribution = params['state_probability']  # shape (S,)
-
     lls = U_given_S_log_likelihoods(params, samples)
+    return hmm_posterior_sample(seed, initial_distribution, transition_matrix, lls)[1]
 
-    return hmm_posterior_sample(seed, initial_distribution, transition_matrix, lls)
+# def sample_state(seed, params, samples):
+#     lls = U_given_S_log_likelihoods(params, samples)
+#     lls += jnp.log(params['state_probability']+1e-16)
+#     return jr.categorical(seed, lls)
+
 
 @jit
 def sample_transition_matrix(seed, params, samples):
-
     state = samples['pose_state']   # shape (N,)
-
     N, S = len(state), len(params['state_transition_count'])
 
     def count_all(t, counts):
         return counts.at[state[t], state[t+1]].add(1)
 
     counts = lax.fori_loop(0, N-1, count_all, jnp.zeros((S, S)))
-
     return tfd.Dirichlet(params['state_transition_count'] + counts).sample(seed=seed)
 
-
-# @jit
 def step(seed, params, observations, samples, outlier_prob,
          ignore_anatomy=False):
 
