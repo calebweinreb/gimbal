@@ -73,10 +73,10 @@ def initialize_parameters(params,
         = jnp.linalg.inv(params['pos_radial_precision'])
 
     # NB: Using jnp.linalg.eigvals throws the NotImplementedError with message "Nonsymmetric eigendecomposition is only implemented on the CPU backend. However, these matrices ARE symmetric...
-    assert jnp.all(onp.linalg.eigvals(params['pos_radial_precision']) > 0.), \
-        f"Expected positive definite radial precision matrix, but got eigenvalues of {jnp.linalg.eigvals(params['pos_radial_precision'])}.\nConsider adjusting value of regularizer."
-    assert jnp.all(onp.linalg.eigvals(params['pos_radial_covariance']) > 0.), \
-        f"Expected positive definite radial covariance matrix, but got eigenvalues of {jnp.linalg.eigvals(params['pos_radial_covariance'])}.\nConsider adjusting value of regularizer."
+    # assert jnp.all(onp.linalg.eigvals(params['pos_radial_precision']) > 0.), \
+    #     f"Expected positive definite radial precision matrix, but got eigenvalues of {jnp.linalg.eigvals(params['pos_radial_precision'])}.\nConsider adjusting value of regularizer."
+    # assert jnp.all(onp.linalg.eigvals(params['pos_radial_covariance']) > 0.), \
+    #     f"Expected positive definite radial covariance matrix, but got eigenvalues of {jnp.linalg.eigvals(params['pos_radial_covariance'])}.\nConsider adjusting value of regularizer."
 
     params['pos_dt_variance'] \
         = jnp.broadcast_to(params['pos_dt_variance'], (num_keypoints,))\
@@ -162,7 +162,7 @@ def initialize_parameters(params,
 
 
 @partial(jit, static_argnames=('ignore_anatomy',))
-def log_joint_probability(params, observations,
+def log_joint_probability(params, observations, outlier_prob,
                           outliers, positions, directions,
                           heading, pose_state, transition_matrix,
                           ignore_anatomy=False):
@@ -173,6 +173,7 @@ def log_joint_probability(params, observations,
     ----------
         params: dict
         observations: ndarray, shape (N, C, K, D_obs).
+        outlier_prob: ndarray, shape (N, C, K).
         outliers: ndarray, shape (N, C, K).
         positions: ndarray, shape (N, K, D).
         directions: ndarray, shape (N, K, D).
@@ -185,10 +186,8 @@ def log_joint_probability(params, observations,
 
     C, S = observations.shape[1], transition_matrix.shape[0]
 
-    Z_prior = tfd.Bernoulli(probs=params['obs_outlier_probability'])
+    Z_prior = tfd.Bernoulli(probs=outlier_prob)
     
-    # Y_ins = tfd.MultivariateNormalFullCovariance(params['obs_inlier_location'], params['obs_inlier_covariance'])  # batch shape (num_cams, num_joints), event_shape (dim_obs)
-    # Y_outs = tfd.MultivariateNormalFullCovariance(params['obs_outlier_location'], params['obs_outlier_covariance'])
     Y_ins = [tfd.MultivariateNormalFullCovariance(
                         params['obs_inlier_location'][c],
                         params['obs_inlier_covariance'][c]) \
@@ -294,7 +293,8 @@ def log_joint_probability(params, observations,
 
     return lp
 
-def initialize(seed, params, observations, init_positions=None, ignore_anatomy=False):
+def initialize(seed, params, observations, outlier_prob, 
+               init_positions=None, ignore_anatomy=False):
     """Initialize latent variables of model.
 
     Parameters
@@ -302,6 +302,7 @@ def initialize(seed, params, observations, init_positions=None, ignore_anatomy=F
         seed: jax.random.PRNGKey
         params: dict
         observations: ndarray, shape (N, C, K, D_obs)
+        outlier_prob: ndarray, shape (N, C, K)
         init_positions: ndarray, shape (N, K, D), optional.
             Initial guess of 3D positions. If None (default), positions
             are triangulated using direct linear triangulation.
@@ -339,7 +340,7 @@ def initialize(seed, params, observations, init_positions=None, ignore_anatomy=F
     # ---------------------------
     # Sample outliers from prior
     # ---------------------------
-    outliers = jr.uniform(next(seed), (N,C,K)) < params['obs_outlier_probability']
+    outliers = jr.uniform(next(seed), (N,C,K)) < outlier_prob
 
     # Consider any NaN observations as outliers
     outliers = jnp.where(jnp.isnan(observations).any(axis=-1),
@@ -410,8 +411,8 @@ def initialize(seed, params, observations, init_positions=None, ignore_anatomy=F
     )
   
 @jit
-def sample_positions(seed, params, observations, samples,
-                     step_size=1e-1, num_leapfrog_steps=1,
+def sample_positions(seed, params, observations, outlier_prob, 
+                     samples, step_size=1e-1, num_leapfrog_steps=1,
                      ignore_anatomy=False):
     """Sample positions by taking one Hamiltonian Monte Carlo step."""
     
@@ -421,6 +422,7 @@ def sample_positions(seed, params, observations, samples,
         return log_joint_probability(
             params,
             observations,
+            outlier_prob,
             samples['outliers'],
             positions,
             samples['directions'],
@@ -446,7 +448,7 @@ def sample_positions(seed, params, observations, samples,
     return positions, kernel_results
 
 @jit
-def sample_outliers(seed, params, observations, samples):
+def sample_outliers(seed, params, observations, outlier_prob, samples):
     """Sample outliers
     
     TODO define inlier/outlier distributions beforehand. These are static.
@@ -462,7 +464,7 @@ def sample_outliers(seed, params, observations, samples):
                                     params['obs_inlier_location'], 
                                     params['obs_inlier_covariance']
                                     )
-    lp_k0 = jnp.log(1-params['obs_outlier_probability'])
+    lp_k0 = jnp.log(1-outlier_prob)
     lp_k0 += Y_inlier.log_prob(error)
 
     # Log probability of predicted observation being outlier
@@ -470,7 +472,7 @@ def sample_outliers(seed, params, observations, samples):
                                     params['obs_outlier_location'], 
                                     params['obs_outlier_covariance']
                                     )
-    lp_k1 = jnp.log(params['obs_outlier_probability'])
+    lp_k1 = jnp.log(outlier_prob)
     lp_k1 += Y_outlier.log_prob(error)
     
     # Update posterior
@@ -588,7 +590,7 @@ def sample_transition_matrix(seed, params, samples):
 
 
 # @jit
-def step(seed, params, observations, samples,
+def step(seed, params, observations, samples, outlier_prob,
          init_step_size=1e-1, num_leapfrog_steps=1,
          ignore_anatomy=False):
 
@@ -596,8 +598,8 @@ def step(seed, params, observations, samples,
     seeds = jr.split(seed, 6)
     
     positions, kernel_results = sample_positions(
-                    seeds[0], params, observations, samples,
-                    init_step_size=init_step_size, 
+                    seeds[0], params, observations, outlier_prob, 
+                    samples, init_step_size=init_step_size, 
                     num_leapfrog_steps=num_leapfrog_steps)
                     
     samples['positions'] = positions
@@ -606,7 +608,7 @@ def step(seed, params, observations, samples,
                     kernel_results.proposed_results.grads_target_log_prob[0]
 
     samples['outliers'] = \
-                    sample_outliers(seeds[1], params, observations, samples)
+                    sample_outliers(seeds[1], params, observations, outlier_prob, samples)
 
     if not ignore_anatomy:
         samples['directions'] = \
@@ -621,103 +623,11 @@ def step(seed, params, observations, samples,
         samples['transition_matrix'] = \
                         sample_transition_matrix(seeds[5], params, samples)
         
-        samples['log_probability'] = log_joint_probability(
-                            params, observations,
-                            samples['outliers'],
-                            samples['positions'], samples['directions'],
-                            samples['heading'], samples['pose_state'],
-                            samples['transition_matrix'],
-                            )
-    return samples
-
-def predict(seed, params, observations, init_positions=None,
-            num_mcmc_iterations=1000,
-            enable_x64=False,
-            hmc_options={'init_step_size':1e-1, 'num_leapfrog_steps':1},
-            out_options={},
-            ):
-    """Predict latent pose variables from observations using MCMC sampling.
-
-    Parameters
-    ----------
-        seed: jax.random.PRNGKey
-        params: dict
-        observations: ndarray, shape (N, C, K, D_obs)
-        init_positions: None or ndarray, shape (N, K, D), optional
-            Initial guess of 3D positions. If None (default), initial
-            guess made from observations in mcmc.initialize
-        num_mcmc_iterations: int
-        enable_x64: bool, optional. default: False
-            If True, enable jax computations with double precision (float64).
-            Else, perform computations with single precision (float32).
-        hmc_options: dict, optional.
-            step_size: int. Step size per leapfrog integration.
-                Larger step sizes lead to faster progress, but too-large step sizes make rejection exponentially more likely. When possible, it's often helpful to match per-variable step sizes to the standard deviations of the target distribution in each variable.
-            num_leapfrog_steps: int. Number of leapfrog steps to take.
-        out_options: dict, optional. If empty (default), samples are not saved. 
-            path: str. Path to which to save file.
-            chunk_size: int, optional. MCMC iteration interval at which to save.
-                Large chunk size reduces I/O overhead of writing to memory, but requires larger local memory to store sample outputs.
-
-    Returns
-    -------
-        buffer, dict
-            Contains last chunk_size of samples
-    """
-
-    # Enable double-precision if specified
-    jax.config.update("jax_enable_x64", enable_x64)
-
-    # Initialize
-    seed, init_seed = jr.split(seed, 2)
-
-    params = initialize_parameters(params)
-    samples = initialize(init_seed, params,
-                              observations, init_positions)
-
-    # Initialize buffer and output file (if specified)
-    chunk_size = out_options.get('chunk_size', num_mcmc_iterations)
-    burnin = out_options.get('burnin', 0)
-
-    hdf5_output = None
-    if isinstance(out_options.get('path', None), str):
-        hdf5_output = util_io.SavePredictionsToHDF(
-                                        out_options['path'], samples,
-                                        max_iter = num_mcmc_iterations-burnin,
-                                        chunk_size=chunk_size,
-                                        **out_options.get('hdf_kwargs', {}))
-    
-    buffer = {k: jnp.empty((chunk_size, *v.shape), dtype=v.dtype)
-              for k, v in samples.items()}
-
-    # Setup progress bar
-    pbar = trange(num_mcmc_iterations)
-    pbar.set_description("lp={:.2f}".format(samples['log_probability']))
-    
-    for itr in pbar:
-        samples = \
-            step(jr.fold_in(seed, itr), params, observations, samples, **hmc_options)
-
-        # ------------------------------------------------------------------
-        # Update the progress bar
-        pbar.set_description("lp={:.2f}".format(samples['log_probability']))
-        pbar.update(1)
-
-        # Update buffer
-        for k, v in buffer.items():
-            buffer[k] = buffer[k].at[itr % chunk_size].set(samples[k])
-            
-        # Save chunk
-        if (hdf5_output is not None):
-            if (itr >= burnin) and (itr+1) % chunk_size == 0:
-                hdf5_output.update(buffer)
-    
-    # Store final chunk of samples, if needed
-    if (hdf5_output is not None) and (itr+1) % chunk_size != 0:
-        # Truncate buffer to only contain not-yet-written samples
-        for k, v in buffer.items():
-            buffer[k] = buffer[k][:itr % chunk_size + 1]
         
-        hdf5_output.update(buffer)
-
-    return buffer
+    samples['log_probability'] = log_joint_probability(
+                        params, observations, outlier_prob,
+                        samples['outliers'], samples['positions'], 
+                        samples['directions'], samples['heading'], 
+                        samples['pose_state'], samples['transition_matrix'],
+                        )
+    return samples
