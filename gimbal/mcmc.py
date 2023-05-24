@@ -184,7 +184,7 @@ def log_joint_probability(params, observations, outlier_prob,
             If True, only include positions and outliers in the model.
     """
 
-    C, S = observations.shape[1], transition_matrix.shape[0]
+    C = observations.shape[1]
 
     Z_prior = tfd.Bernoulli(probs=outlier_prob)
     
@@ -391,6 +391,12 @@ def initialize(seed, params, observations, outlier_prob,
         num_states = len(params['state_probability'])
         pose_state = jr.randint(next(seed), (N,), 0, num_states)
         transition_matrix = jnp.ones((num_states, num_states)) / num_states
+       
+    else:
+        heading = None
+        directions = None
+        pose_state = None
+        transition_matrix = None
 
     log_prob = log_joint_probability(
                     params, observations, outlier_prob,
@@ -615,5 +621,5 @@ def step(seed, params, observations, samples, outlier_prob,
                         samples['outliers'], samples['positions'], 
                         samples['directions'], samples['heading'], 
                         samples['pose_state'], samples['transition_matrix'],
-                        )
+                        ignore_anatomy=ignore_anatomy)
     return samples
