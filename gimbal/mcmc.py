@@ -1,11 +1,6 @@
 """
 gimbal/mcmc.py
 """
-
-import contextlib
-import numpy as onp
-from tqdm.auto import trange
-
 import jax.config
 import jax.numpy as jnp
 import jax.random as jr
