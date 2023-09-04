@@ -106,7 +106,6 @@ def triangulate(Ps, ys, camera_pairs=[]):
         Xs: ndarray, shape (...,3)
             3D coordinates in ambient space
     """
-    
     C = len(Ps)
     batch_shape = ys.shape[1:-1]
     
@@ -123,6 +122,10 @@ def triangulate(Ps, ys, camera_pairs=[]):
 
 
 def opencv_triangulate(Ps, ys, camera_pairs=[]):
+    """Robust triangulation of 3D positions from multiple 2D observations.
+
+    See triangulate() for details.
+    """
     C = len(Ps)
     batch_shape = ys.shape[1:-1]
     if not camera_pairs:
@@ -130,10 +133,15 @@ def opencv_triangulate(Ps, ys, camera_pairs=[]):
     Xs = jnp.empty((len(camera_pairs), *batch_shape, 3))
     for i, (c0, c1) in enumerate(camera_pairs):
         Xs = Xs.at[i].set(opencv_triangulate_dlt(Ps[(c0,c1),:,:], ys[(c0,c1),...]))
-    return jnp.median(Xs, axis=0)
+    return jnp.nanmedian(Xs, axis=0)
 
 
 def opencv_triangulate_dlt(Ps, ys):
+    """Triangulate 3D position between two 2D correspondances using the direct
+    linear transformation (DLT) method.
+
+    See triangulate_dlt() for details.
+    """
     import numpy as np, cv2
     batch_shape = ys.shape[1:-1]
     Ps = np.array(Ps)
