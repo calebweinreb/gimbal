@@ -10,7 +10,7 @@ from functools import partial
 
 import tensorflow_probability.substrates.jax as tfp
 import tensorflow_probability.substrates.jax.distributions as tfd
-from dynamax.hidden_markov_model.inference import hmm_posterior_sample
+from dynamax.hidden_markov_model import parallel_hmm_posterior_sample
 
 from .util import (project,
                   xyz_to_uv, uv_to_xyz, signed_angular_difference,
@@ -565,7 +565,7 @@ def sample_state(seed, params, samples):
     transition_matrix = samples['transition_matrix']    # shape (S, S)
     initial_distribution = params['state_probability']  # shape (S,)
     lls = U_given_S_log_likelihoods(params, samples)
-    return hmm_posterior_sample(seed, initial_distribution, transition_matrix, lls)[1]
+    return parallel_hmm_posterior_sample(seed, initial_distribution, transition_matrix, lls)[1]
 
 # def sample_state(seed, params, samples):
 #     lls = U_given_S_log_likelihoods(params, samples)
